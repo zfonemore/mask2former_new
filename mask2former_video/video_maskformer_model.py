@@ -44,6 +44,7 @@ class VideoMaskFormer(nn.Module):
         pixel_std: Tuple[float],
         # video
         num_frames,
+        hidden_dim,
     ):
         """
         Args:
@@ -86,6 +87,11 @@ class VideoMaskFormer(nn.Module):
         self.register_buffer("pixel_std", torch.Tensor(pixel_std).view(-1, 1, 1), False)
 
         self.num_frames = num_frames
+
+        # learnable query features
+        self.track_query = nn.Embedding(num_queries, hidden_dim)
+        # learnable query p.e.
+        self.track_query_embed = nn.Embedding(num_queries, hidden_dim)
 
     @classmethod
     def from_config(cls, cfg):
@@ -145,6 +151,7 @@ class VideoMaskFormer(nn.Module):
             "pixel_std": cfg.MODEL.PIXEL_STD,
             # video
             "num_frames": cfg.INPUT.SAMPLING_FRAME_NUM,
+            "hidden_dim": cfg.MODEL.MASK_FORMER.HIDDEN_DIM,
         }
 
     @property
