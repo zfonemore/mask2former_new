@@ -91,7 +91,7 @@ class VideoMaskFormer(nn.Module):
         # learnable query features
         self.track_query = nn.Embedding(num_queries, hidden_dim)
         # learnable query p.e.
-        self.track_query_embed = nn.Embedding(num_queries, hidden_dim)
+        self.track_query_pos = nn.Embedding(num_queries, hidden_dim)
 
     @classmethod
     def from_config(cls, cfg):
@@ -192,7 +192,7 @@ class VideoMaskFormer(nn.Module):
         images = ImageList.from_tensors(images, self.size_divisibility)
 
         features = self.backbone(images.tensor)
-        outputs = self.sem_seg_head(features)
+        outputs = self.sem_seg_head(features, track_query=self.track_query.weight, track_query_pos=self.track_query_pos.weight)
 
         if self.training:
             # mask classification target

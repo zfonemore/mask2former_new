@@ -29,7 +29,7 @@ class SelfAttentionLayer(nn.Module):
         self.normalize_before = normalize_before
 
         self._reset_parameters()
-    
+
     def _reset_parameters(self):
         for p in self.parameters():
             if p.dim() > 1:
@@ -59,7 +59,7 @@ class SelfAttentionLayer(nn.Module):
         tgt2 = self.self_attn(q, k, value=tgt2, attn_mask=tgt_mask,
                               key_padding_mask=tgt_key_padding_mask)[0]
         tgt = tgt + self.dropout(tgt2)
-        
+
         return tgt
 
     def forward(self, tgt,
@@ -87,7 +87,7 @@ class CrossAttentionLayer(nn.Module):
         self.normalize_before = normalize_before
 
         self._reset_parameters()
-    
+
     def _reset_parameters(self):
         for p in self.parameters():
             if p.dim() > 1:
@@ -107,7 +107,7 @@ class CrossAttentionLayer(nn.Module):
                                    key_padding_mask=memory_key_padding_mask)[0]
         tgt = tgt + self.dropout(tgt2)
         tgt = self.norm(tgt)
-        
+
         return tgt
 
     def forward_pre(self, tgt, memory,
@@ -152,7 +152,7 @@ class FFNLayer(nn.Module):
         self.normalize_before = normalize_before
 
         self._reset_parameters()
-    
+
     def _reset_parameters(self):
         for p in self.parameters():
             if p.dim() > 1:
@@ -278,7 +278,7 @@ class VideoMultiScaleMaskedTransformerDecoder(nn.Module):
         # positional encoding
         N_steps = hidden_dim // 2
         self.pe_layer = PositionEmbeddingSine3D(N_steps, normalize=True)
-        
+
         # define Transformer decoder here
         self.num_heads = nheads
         self.num_layers = dec_layers
@@ -318,9 +318,9 @@ class VideoMultiScaleMaskedTransformerDecoder(nn.Module):
 
         self.num_queries = num_queries
         # learnable query features
-        self.query_feat = nn.Embedding(num_queries, hidden_dim)
+        #self.query_feat = nn.Embedding(num_queries, hidden_dim)
         # learnable query p.e.
-        self.query_embed = nn.Embedding(num_queries, hidden_dim)
+        #self.query_embed = nn.Embedding(num_queries, hidden_dim)
 
         # level embedding (we always use 3 scales)
         self.num_feature_levels = 3
@@ -343,7 +343,7 @@ class VideoMultiScaleMaskedTransformerDecoder(nn.Module):
         ret = {}
         ret["in_channels"] = in_channels
         ret["mask_classification"] = mask_classification
-        
+
         ret["num_classes"] = cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES
         ret["hidden_dim"] = cfg.MODEL.MASK_FORMER.HIDDEN_DIM
         ret["num_queries"] = cfg.MODEL.MASK_FORMER.NUM_OBJECT_QUERIES
@@ -367,7 +367,7 @@ class VideoMultiScaleMaskedTransformerDecoder(nn.Module):
 
         return ret
 
-    def forward(self, x, mask_features, mask = None):
+    def forward(self, x, mask_features, mask = None, track_query=None, track_query_pos=None):
         bt, c_m, h_m, w_m = mask_features.shape
         bs = bt // self.num_frames if self.training else 1
         t = bt // bs
@@ -393,8 +393,14 @@ class VideoMultiScaleMaskedTransformerDecoder(nn.Module):
             src[-1] = src[-1].view(bs, t, c, hw).permute(1, 3, 0, 2).flatten(0, 1)
 
         # QxNxC
-        query_embed = self.query_embed.weight.unsqueeze(1).repeat(1, bs, 1)
-        output = self.query_feat.weight.unsqueeze(1).repeat(1, bs, 1)
+        if track_query is not None:
+            query_embed = track_query_pos.unsqueeze(1).repeat(1, bs, 1)
+            output = track_query.unsqueeze(1).repeat(1, bs, 1)
+            #import pdb
+            #pdb.set_trace()
+        else:
+            query_embed = self.query_embed.weight.unsqueeze(1).repeat(1, bs, 1)
+            output = self.query_feat.weight.unsqueeze(1).repeat(1, bs, 1)
 
         predictions_class = []
         predictions_mask = []
@@ -420,7 +426,7 @@ class VideoMultiScaleMaskedTransformerDecoder(nn.Module):
                 tgt_key_padding_mask=None,
                 query_pos=query_embed
             )
-            
+
             # FFN
             output = self.transformer_ffn_layers[i](
                 output
