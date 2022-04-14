@@ -89,9 +89,9 @@ class VideoMaskFormer(nn.Module):
         self.num_frames = num_frames
 
         # learnable query features
-        self.track_query = nn.Embedding(num_queries, hidden_dim)
+        self.track_query = nn.Embedding(num_queries, hidden_dim*2)
         # learnable query p.e.
-        self.track_query_pos = nn.Embedding(num_queries, hidden_dim)
+        #self.track_query_pos = nn.Embedding(num_queries, hidden_dim)
 
     @classmethod
     def from_config(cls, cfg):
@@ -158,6 +158,31 @@ class VideoMaskFormer(nn.Module):
     def device(self):
         return self.pixel_mean.device
 
+    def _generate_empty_tracks(self):
+        track_instances = Instances((1, 1))
+        num_queries, dim = self.track_query.weight.shape  # (100, 512)
+        device = self.device
+        track_instances.query_pos = self.track_query.weight
+        track_instances.output_embedding = torch.zeros((num_queries, dim >> 1), device=device)
+        track_instances.obj_idxes = torch.full((len(track_instances),), -1, dtype=torch.long, device=device)
+        track_instances.matched_gt_idxes = torch.full((len(track_instances),), -1, dtype=torch.long, device=device)
+        track_instances.disappear_time = torch.zeros((len(track_instances), ), dtype=torch.long, device=device)
+        track_instances.iou = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
+        track_instances.scores = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
+        track_instances.track_scores = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
+        track_instances.pred_boxes = torch.zeros((len(track_instances), 4), dtype=torch.float, device=device)
+        track_instances.pred_logits = torch.zeros((len(track_instances), self.sem_seg_head.num_classes), dtype=torch.float, device=device)
+
+        '''
+        mem_bank_len = self.mem_bank_len
+        track_instances.mem_bank = torch.zeros((len(track_instances), mem_bank_len, dim // 2), dtype=torch.float32, device=device)
+        track_instances.mem_padding_mask = torch.ones((len(track_instances), mem_bank_len), dtype=torch.bool, device=device)
+        track_instances.save_period = torch.zeros((len(track_instances), ), dtype=torch.float32, device=device)
+        '''
+
+        return track_instances.to(self.device)
+
+
     def forward(self, batched_inputs):
         """
         Args:
@@ -192,7 +217,8 @@ class VideoMaskFormer(nn.Module):
         images = ImageList.from_tensors(images, self.size_divisibility)
 
         features = self.backbone(images.tensor)
-        outputs = self.sem_seg_head(features, track_query=self.track_query.weight, track_query_pos=self.track_query_pos.weight)
+        track_instances = self._generate_empty_tracks()
+        outputs = self.sem_seg_head(features, track_query=track_instances.query_pos)
 
         if self.training:
             # mask classification target
