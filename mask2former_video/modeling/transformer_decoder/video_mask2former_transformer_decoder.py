@@ -367,7 +367,7 @@ class VideoMultiScaleMaskedTransformerDecoder(nn.Module):
 
         return ret
 
-    def forward(self, x, mask_features, mask = None, track_query=None, track_query_pos=None):
+    def forward(self, x, mask_features, mask = None, track_query=None):
         bt, c_m, h_m, w_m = mask_features.shape
         bs = bt // self.num_frames if self.training else 1
         t = bt // bs
@@ -394,10 +394,9 @@ class VideoMultiScaleMaskedTransformerDecoder(nn.Module):
 
         # QxNxC
         if track_query is not None:
-            query_embed = track_query_pos.unsqueeze(1).repeat(1, bs, 1)
-            output = track_query.unsqueeze(1).repeat(1, bs, 1)
-            #import pdb
-            #pdb.set_trace()
+            query_embed, output = torch.split(track_query, c, dim=1)
+            query_embed = query_embed.unsqueeze(1).repeat(1, bs, 1)
+            output = output.unsqueeze(1).repeat(1, bs, 1)
         else:
             query_embed = self.query_embed.weight.unsqueeze(1).repeat(1, bs, 1)
             output = self.query_feat.weight.unsqueeze(1).repeat(1, bs, 1)
