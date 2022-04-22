@@ -369,7 +369,8 @@ class VideoMultiScaleMaskedTransformerDecoder(nn.Module):
 
     def forward(self, x, mask_features, mask = None, track_query=None):
         bt, c_m, h_m, w_m = mask_features.shape
-        bs = bt // self.num_frames if self.training else 1
+        #bs = bt // self.num_frames if self.training else 1
+        bs = bt
         t = bt // bs
         mask_features = mask_features.view(bs, t, c_m, h_m, w_m)
 

@@ -15,7 +15,8 @@ from detectron2.modeling.postprocessing import sem_seg_postprocess
 from detectron2.structures import Boxes, ImageList, Instances, BitMasks
 
 from .modeling.criterion import VideoSetCriterion
-from .modeling.matcher import VideoHungarianMatcher
+from .modeling.matcher import VideoHungarianMatcher, VideoTrackHungarianMatcher
+#from .modeling.qim import build as build_query_interaction_layer
 from .utils.memory import retry_if_cuda_oom
 
 logger = logging.getLogger(__name__)
@@ -108,7 +109,7 @@ class VideoMaskFormer(nn.Module):
         mask_weight = cfg.MODEL.MASK_FORMER.MASK_WEIGHT
 
         # building criterion
-        matcher = VideoHungarianMatcher(
+        matcher = VideoTrackHungarianMatcher(
             cost_class=class_weight,
             cost_mask=mask_weight,
             cost_dice=dice_weight,
@@ -136,6 +137,9 @@ class VideoMaskFormer(nn.Module):
             oversample_ratio=cfg.MODEL.MASK_FORMER.OVERSAMPLE_RATIO,
             importance_sample_ratio=cfg.MODEL.MASK_FORMER.IMPORTANCE_SAMPLE_RATIO,
         )
+
+        # qim module
+        #query_interaction_layer = build_query_interaction_layer(args, args.query_interaction_layer, d_model, hidden_dim, d_model*2)
 
         return {
             "backbone": backbone,
@@ -169,9 +173,9 @@ class VideoMaskFormer(nn.Module):
         track_instances.disappear_time = torch.zeros((len(track_instances), ), dtype=torch.long, device=device)
         track_instances.iou = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
         track_instances.scores = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
-        track_instances.track_scores = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
-        track_instances.pred_boxes = torch.zeros((len(track_instances), 4), dtype=torch.float, device=device)
-        track_instances.pred_logits = torch.zeros((len(track_instances), self.sem_seg_head.num_classes), dtype=torch.float, device=device)
+        #track_instances.track_scores = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
+        #track_instances.pred_boxes = torch.zeros((len(track_instances), 4), dtype=torch.float, device=device)
+        track_instances.pred_logits = torch.zeros((len(track_instances), self.sem_seg_head.num_classes+1), dtype=torch.float, device=device)
 
         '''
         mem_bank_len = self.mem_bank_len
@@ -181,7 +185,6 @@ class VideoMaskFormer(nn.Module):
         '''
 
         return track_instances.to(self.device)
-
 
     def forward(self, batched_inputs):
         """
@@ -210,6 +213,7 @@ class VideoMaskFormer(nn.Module):
                         Each dict contains keys "id", "category_id", "isthing".
         """
         images = []
+        batch_size = len(batched_inputs)
         for video in batched_inputs:
             for frame in video["image"]:
                 images.append(frame.to(self.device))
@@ -217,15 +221,29 @@ class VideoMaskFormer(nn.Module):
         images = ImageList.from_tensors(images, self.size_divisibility)
 
         features = self.backbone(images.tensor)
-        track_instances = self._generate_empty_tracks()
-        outputs = self.sem_seg_head(features, track_query=track_instances.query_pos)
+
+        # generate empty track instances
+        track_instances_list = []
+        for i in range(batch_size):
+            track_instances = self._generate_empty_tracks()
+            track_instances_list.append(track_instances)
 
         if self.training:
             # mask classification target
             targets = self.prepare_targets(batched_inputs, images)
 
-            # bipartite matching-based loss
-            losses = self.criterion(outputs, targets)
+            for frame in range(self.num_frames):
+                indices = slice(frame, frame+self.num_frames*(batch_size-1)+1, self.num_frames)
+                features_perframe = {}
+                for key in features.keys():
+                    features_perframe[key] = features[key][indices]
+                targets_perframe = targets[frame]
+
+                outputs = self.sem_seg_head(features_perframe, track_query=track_instances_list[0].query_pos)
+
+                # bipartite matching-based loss
+                losses = self.post_process(outputs, track_instances_list, targets_perframe, is_last=False)
+                #losses = self.criterion(outputs, targets)
 
             for k in list(losses.keys()):
                 if k in self.criterion.weight_dict:
@@ -260,30 +278,64 @@ class VideoMaskFormer(nn.Module):
     def prepare_targets(self, targets, images):
         h_pad, w_pad = images.tensor.shape[-2:]
         gt_instances = []
-        for targets_per_video in targets:
-            _num_instance = len(targets_per_video["instances"][0])
-            mask_shape = [_num_instance, self.num_frames, h_pad, w_pad]
-            gt_masks_per_video = torch.zeros(mask_shape, dtype=torch.bool, device=self.device)
+        for frame in range(self.num_frames):
+            gt_instances_perframe = []
+            for targets_per_video in targets:
+                _num_instance = len(targets_per_video["instances"][0])
+                #mask_shape = [_num_instance, self.num_frames, h_pad, w_pad]
+                mask_shape = [_num_instance, 1, h_pad, w_pad]
+                gt_masks = torch.zeros(mask_shape, dtype=torch.bool, device=self.device)
 
-            gt_ids_per_video = []
-            for f_i, targets_per_frame in enumerate(targets_per_video["instances"]):
-                targets_per_frame = targets_per_frame.to(self.device)
+                targets_per_frame = targets_per_video["instances"][frame].to(self.device)
                 h, w = targets_per_frame.image_size
 
-                gt_ids_per_video.append(targets_per_frame.gt_ids[:, None])
-                gt_masks_per_video[:, f_i, :h, :w] = targets_per_frame.gt_masks.tensor
+                gt_ids = targets_per_frame.gt_ids
+                gt_masks[:, 0, :h, :w] = targets_per_frame.gt_masks.tensor
 
-            gt_ids_per_video = torch.cat(gt_ids_per_video, dim=1)
-            valid_idx = (gt_ids_per_video != -1).any(dim=-1)
+                valid_idx = (gt_ids!= -1)
 
-            gt_classes_per_video = targets_per_frame.gt_classes[valid_idx]          # N,
-            gt_ids_per_video = gt_ids_per_video[valid_idx]                          # N, num_frames
+                gt_classes = targets_per_frame.gt_classes[valid_idx]          # N,
+                gt_ids = gt_ids[valid_idx].long()               # N, num_frames
+                gt_masks = gt_masks[valid_idx].float()          # N, num_frames, H, W
 
-            gt_instances.append({"labels": gt_classes_per_video, "ids": gt_ids_per_video})
-            gt_masks_per_video = gt_masks_per_video[valid_idx].float()          # N, num_frames, H, W
-            gt_instances[-1].update({"masks": gt_masks_per_video})
+                gt_instances_perframe.append({"labels": gt_classes, "ids": gt_ids, "masks": gt_masks})
+            gt_instances.append(gt_instances_perframe)
+
 
         return gt_instances
+
+
+    def post_process(self, output, track_instances_list, targets, is_last):
+        with torch.no_grad():
+            if self.training:
+                scores = F.softmax(output['pred_logits'][:], dim=-1)[:, :, :-1]
+            else:
+                scores = F.softmax(output['pred_logits'][:], dim=-1)[:, :, :-1]
+                labels = torch.arange(self.sem_seg_head.num_classes, device=self.device).unsqueeze(0).repeat(self.num_queries, 1).flatten(0, 1)
+                scores_per_image, topk_indices = scores.flatten(1, 2).topk(10, sorted=False)
+        for i, track_instances in enumerate(track_instances_list):
+            #track_instances.scores = scores[i]
+            track_instances.pred_logits = output['pred_logits'][i]
+        if self.training:
+            # the track id will be assigned by the mather.
+            losses = self.criterion(output, targets, track_instances_list)
+        else:
+            self.track_base.update(track_instances)
+        #tmp = {}
+        #tmp['init_track_instances'] = self._generate_empty_tracks()
+        #tmp['track_instances'] = track_instances
+        if not is_last:
+            for i, track_instances in enumerate(track_instances_list):
+                init_track_instances = self._generate_empty_tracks()
+                active_idxes = (track_instances.obj_idxes >= 0)
+                active_track_instances = track_instances[active_idxes]
+                merged_track_instances = Instances.cat([init_track_instances, active_track_instances])
+                track_instances_list[i] = merged_track_instances
+        else:
+            for i in range(len(track_instances_list)):
+                merged_track_instances = init_track_instances
+                track_instances_list[i]= merged_track_instances
+        return losses
 
     def inference_video(self, pred_cls, pred_masks, img_size, output_height, output_width):
         if len(pred_cls) > 0:
