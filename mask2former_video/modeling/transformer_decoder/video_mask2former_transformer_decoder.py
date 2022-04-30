@@ -439,6 +439,7 @@ class VideoMultiScaleMaskedTransformerDecoder(nn.Module):
         assert len(predictions_class) == self.num_layers + 1
 
         out = {
+            'hs': output.squeeze(1),
             'pred_logits': predictions_class[-1],
             'pred_masks': predictions_mask[-1],
             'aux_outputs': self._set_aux_loss(

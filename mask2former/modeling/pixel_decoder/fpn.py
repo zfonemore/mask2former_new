@@ -285,6 +285,8 @@ class TransformerEncoderPixelDecoder(BasePixelDecoder):
         multi_scale_features = []
         num_cur_levels = 0
         # Reverse feature maps into top-down order (from low to high resolution)
+        import pdb
+        pdb.set_trace()
         for idx, f in enumerate(self.in_features[::-1]):
             x = features[f]
             lateral_conv = self.lateral_convs[idx]
