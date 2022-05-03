@@ -23,6 +23,21 @@ from .augmentation import build_augmentation
 
 __all__ = ["YTVISDatasetMapper", "CocoClipDatasetMapper"]
 
+import sys
+import pdb
+
+class ForkedPdb(pdb.Pdb):
+    """A Pdb subclass that may be used
+    from a forked multiprocessing child
+
+    """
+    def interaction(self, *args, **kwargs):
+        _stdin = sys.stdin
+        try:
+            sys.stdin = open('/dev/stdin')
+            pdb.Pdb.interaction(self, *args, **kwargs)
+        finally:
+            sys.stdin = _stdin
 
 def filter_empty_instances(instances, by_box=True, by_mask=True, box_threshold=1e-5):
     """
@@ -51,7 +66,7 @@ def filter_empty_instances(instances, by_box=True, by_mask=True, box_threshold=1
         m = m & x
 
     instances.gt_ids[~m] = -1
-    return instances
+    return instances, m.max()
 
 
 def _get_dummy_anno(num_classes):
@@ -184,8 +199,25 @@ class YTVISDatasetMapper:
         # TODO consider examining below deepcopy as it costs huge amount of computations.
         dataset_dict = copy.deepcopy(dataset_dict)  # it will be modified by code below
 
+        video_annos = dataset_dict.pop("annotations", None)
+        file_names = dataset_dict.pop("file_names", None)
+
         video_length = dataset_dict["length"]
         if self.is_train:
+            frame_candids = []
+            for frame in range(video_length):
+                if len(video_annos[frame]) > 0:
+                    annos = video_annos[frame]
+                    area = 0
+                    for anno in annos:
+                        width = anno['bbox'][2] - anno['bbox'][0]
+                        height = anno['bbox'][3] - anno['bbox'][1]
+                        area += abs(width * height)
+                    if area < 1e-5:
+                        continue
+                    frame_candids.append(frame)
+            video_length = len(frame_candids)
+
             ref_frame = random.randrange(video_length)
 
             start_idx = max(0, ref_frame-self.sampling_frame_range)
@@ -202,13 +234,10 @@ class YTVISDatasetMapper:
         else:
             selected_idx = range(video_length)
 
-        video_annos = dataset_dict.pop("annotations", None)
-        file_names = dataset_dict.pop("file_names", None)
-
         if self.is_train:
             _ids = set()
             for frame_idx in selected_idx:
-                _ids.update([anno["id"] for anno in video_annos[frame_idx]])
+                _ids.update([anno["id"] for anno in video_annos[frame_candids[frame_idx]]])
             ids = dict()
             for i, _id in enumerate(_ids):
                 ids[_id] = i
@@ -216,7 +245,9 @@ class YTVISDatasetMapper:
         dataset_dict["image"] = []
         dataset_dict["instances"] = []
         dataset_dict["file_names"] = []
-        for frame_idx in selected_idx:
+        for idx in selected_idx:
+        #while frame < len(selected_idx):
+            frame_idx = frame_candids[idx]
             dataset_dict["file_names"].append(file_names[frame_idx])
 
             # Read image
@@ -261,8 +292,29 @@ class YTVISDatasetMapper:
             instances.gt_ids = torch.tensor(_gt_ids)
             if instances.has("gt_masks"):
                 instances.gt_boxes = instances.gt_masks.get_bounding_boxes()
-                instances = filter_empty_instances(instances)
+                instances, noempty = filter_empty_instances(instances)
+                '''
+                if (not noempty) and (frame != len(selected_idx)-1):
+                    dataset_dict['image'].pop()
+                    dataset_dict['file_names'].pop()
+                    if frame > 0:
+                        selected_idx[frame] = random.randint(selected_idx[frame-1], selected_idx[frame+1])
+                    else:
+                        selected_idx[frame] = random.randint(0, selected_idx[frame+1])
+                    continue
+                '''
             else:
+                '''
+                if (frame != len(selected_idx)-1):
+                    dataset_dict['image'].pop()
+                    dataset_dict['file_names'].pop()
+                    if frame > 0:
+                        selected_idx[frame] = random.randint(selected_idx[frame-1], selected_idx[frame+1])
+                    else:
+                        selected_idx[frame] = random.randint(start_idx, selected_idx[frame+1])
+                    continue
+                else:
+                '''
                 instances.gt_masks = BitMasks(torch.empty((0, *image_shape)))
             dataset_dict["instances"].append(instances)
 
