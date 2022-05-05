@@ -247,7 +247,10 @@ class YTVISDatasetMapper:
         dataset_dict["file_names"] = []
         for idx in selected_idx:
         #while frame < len(selected_idx):
-            frame_idx = frame_candids[idx]
+            if self.is_train:
+                frame_idx = frame_candids[idx]
+            else:
+                frame_idx = idx
             dataset_dict["file_names"].append(file_names[frame_idx])
 
             # Read image
