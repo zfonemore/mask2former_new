@@ -214,68 +214,29 @@ class VideoTrackHungarianMatcher(nn.Module):
         self.num_points = num_points
 
     @torch.no_grad()
-    def memory_efficient_forward(self, outputs, targets, track_instances_list):
+    def memory_efficient_forward(self, outputs, targets):
         """More memory-friendly matching"""
         bs, num_queries = outputs["pred_logits"].shape[:2]
 
-        all_indices = []
+        indices = []
 
         # Iterate through batch size
         for b in range(bs):
 
-            gt_instances = targets[b] # gt instances of current image.
-            gt_labels = gt_instances["labels"]
-            gt_ids = gt_instances["ids"]
+            out_prob = outputs["pred_logits"][b].softmax(-1)  # [num_queries, num_classes]
+            tgt_ids = targets[b]["labels"]
 
-            track_instances = track_instances_list[b]
-            pred_logits_i = track_instances.pred_logits  # predicted logits of i-th image.
-            obj_idxes_list = gt_ids.detach().cpu().numpy().tolist()
-            obj_idx_to_gt_idx = {obj_idx: gt_idx for gt_idx, obj_idx in enumerate(obj_idxes_list)}
-
-            # step1: inherit from the tracked instances
-            num_disappear_track = 0
-            for j in range(len(track_instances)):
-                obj_id = track_instances.obj_idxes[j].item()
-                # set new target idx.
-                if obj_id >= 0:
-                    if obj_id in obj_idx_to_gt_idx:
-                        track_instances.matched_gt_idxes[j] = obj_idx_to_gt_idx[obj_id]
-                    else:
-                        num_disappear_track += 1
-                        track_instances.matched_gt_idxes[j] = -1  # track-disappear case.
-                else:
-                    track_instances.matched_gt_idxes[j] = -1
-            full_track_idxes = torch.arange(len(track_instances), dtype=torch.long).to(pred_logits_i.device)
-            matched_track_idxes = (track_instances.matched_gt_idxes >= 0)  # occu
-            prev_matched_indices = torch.stack(
-                [full_track_idxes[matched_track_idxes], track_instances.matched_gt_idxes[matched_track_idxes]], dim=1).to(
-                pred_logits_i.device)
-
-            # step2. select the unmatched slots.
-            # note that the FP tracks whose obj_idxes are -2 will not be selected here.
-            unmatched_track_idxes = full_track_idxes[track_instances.obj_idxes == -1]
-
-            # step3. select the untracked gt instances (new tracks).
-            tgt_indexes = track_instances.matched_gt_idxes
-            tgt_indexes = tgt_indexes[tgt_indexes != -1]
-
-            tgt_state = torch.zeros(len(gt_labels)).to(pred_logits_i.device)
-            tgt_state[tgt_indexes] = 1
-            untracked_tgt_indexes = torch.arange(len(gt_labels)).to(pred_logits_i.device)[tgt_state == 0]
-            gt_labels = gt_labels[untracked_tgt_indexes]
-
-            # step4. do matching between the unmatched slots and GTs.
             # Compute the classification cost. Contrary to the loss, we don't use the NLL,
             # but approximate it in 1 - proba[target class].
             # The 1 is a constant that doesn't change the matching, it can be ommitted.
-
-            out_prob = outputs["pred_logits"][b].softmax(-1)  # [num_queries, num_classes]
-            cost_class = -out_prob[:, gt_labels]
+            cost_class = -out_prob[:, tgt_ids]
 
             out_mask = outputs["pred_masks"][b]  # [num_queries, T, H_pred, W_pred]
             # gt masks are already padded when preparing target
-            tgt_mask = gt_instances["masks"][untracked_tgt_indexes].to(out_mask)  # [num_gts, T, H_pred, W_pred]
+            tgt_mask = targets[b]["masks"].to(out_mask)  # [num_gts, T, H_pred, W_pred]
 
+            # out_mask = out_mask[:, None]
+            # tgt_mask = tgt_mask[:, None]
             # all masks share the same set of points for efficient matching!
             point_coords = torch.rand(1, self.num_points, 2, device=out_mask.device)
             # get gt labels
@@ -308,7 +269,114 @@ class VideoTrackHungarianMatcher(nn.Module):
             )
             C = C.reshape(num_queries, -1).cpu()
 
-            indices = linear_sum_assignment(C)
+            indices.append(linear_sum_assignment(C))
+
+        return [
+            (torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64))
+            for i, j in indices
+        ]
+
+    @torch.no_grad()
+    def memory_efficient_forward_track(self, outputs, targets, track_instances_list):
+        """More memory-friendly matching"""
+        bs, num_queries = outputs["pred_logits"].shape[:2]
+
+        all_indices = []
+
+        # Iterate through batch size
+        for b in range(bs):
+
+            gt_instances = targets[b] # gt instances of current image.
+            gt_labels = gt_instances["labels"]
+            gt_ids = gt_instances["ids"]
+
+            track_instances = track_instances_list[b]
+            pred_logits_i = track_instances.pred_logits  # predicted logits of i-th image.
+            obj_idxes_list = gt_ids.detach().cpu().numpy().tolist()
+            obj_idx_to_gt_idx = {obj_idx: gt_idx for gt_idx, obj_idx in enumerate(obj_idxes_list)}
+
+            # step1: inherit from the tracked instances
+            num_disappear_track = 0
+            for j in range(len(track_instances)):
+                obj_id = track_instances.obj_idxes[j].item()
+                # set new target idx.
+                if obj_id >= 0:
+                    if obj_id in obj_idx_to_gt_idx:
+                        track_instances.matched_gt_idxes[j] = obj_idx_to_gt_idx[obj_id]
+                    else:
+                        num_disappear_track += 1
+                        track_instances.matched_gt_idxes[j] = -1  # track-disappear case.
+                else:
+                    track_instances.matched_gt_idxes[j] = -1
+
+            full_track_idxes = torch.arange(len(track_instances), dtype=torch.long).to(pred_logits_i.device)
+            matched_track_idxes = (track_instances.matched_gt_idxes >= 0)  # occu
+            prev_matched_indices = torch.stack(
+                [full_track_idxes[matched_track_idxes], track_instances.matched_gt_idxes[matched_track_idxes]], dim=1).to(
+                pred_logits_i.device)
+
+            # step2. select the unmatched slots.
+            # note that the FP tracks whose obj_idxes are -2 will not be selected here.
+            unmatched_track_idxes = full_track_idxes[track_instances.obj_idxes == -1]
+
+            # step3. select the untracked gt instances (new tracks).
+            tgt_indexes = track_instances.matched_gt_idxes
+            tgt_indexes = tgt_indexes[tgt_indexes != -1]
+
+            tgt_state = torch.zeros(len(gt_labels)).to(pred_logits_i.device)
+            tgt_state[tgt_indexes] = 1
+            untracked_tgt_indexes = torch.arange(len(gt_labels)).to(pred_logits_i.device)[tgt_state == 0]
+            gt_labels = gt_labels[untracked_tgt_indexes]
+
+            # step4. do matching between the unmatched slots and GTs.
+            # Compute the classification cost. Contrary to the loss, we don't use the NLL,
+            # but approximate it in 1 - proba[target class].
+            # The 1 is a constant that doesn't change the matching, it can be ommitted.
+
+            out_prob = outputs["pred_logits"][b].softmax(-1)[unmatched_track_idxes]  # [num_queries, num_classes]
+            cost_class = -out_prob[:, gt_labels]
+
+            num_queries = len(unmatched_track_idxes)
+            out_mask = outputs["pred_masks"][b][unmatched_track_idxes]  # [num_queries, T, H_pred, W_pred]
+            # gt masks are already padded when preparing target
+            tgt_mask = gt_instances["masks"][untracked_tgt_indexes].to(out_mask)  # [num_gts, T, H_pred, W_pred]
+
+            # all masks share the same set of points for efficient matching!
+            point_coords = torch.rand(1, self.num_points, 2, device=out_mask.device)
+            # get gt labels
+            tgt_mask = point_sample(
+                tgt_mask,
+                point_coords.repeat(tgt_mask.shape[0], 1, 1),
+                align_corners=False,
+            ).flatten(1)
+
+            out_mask = point_sample(
+                out_mask,
+                point_coords.repeat(out_mask.shape[0], 1, 1),
+                align_corners=False,
+            ).flatten(1)
+
+            if len(tgt_mask) > 0:
+                with autocast(enabled=False):
+                    out_mask = out_mask.float()
+                    tgt_mask = tgt_mask.float()
+                    # Compute the focal loss between masks
+                    cost_mask = batch_sigmoid_ce_loss_jit(out_mask, tgt_mask)
+
+                    # Compute the dice loss betwen masks
+                    cost_dice = batch_dice_loss_jit(out_mask, tgt_mask)
+
+                # Final cost matrix
+                C = (
+                    self.cost_mask * cost_mask
+                    + self.cost_class * cost_class
+                    + self.cost_dice * cost_dice
+                )
+                C = C.reshape(num_queries, -1).cpu()
+
+                indices = linear_sum_assignment(C)
+            else:
+                indices = ([], [])
 
             # step5. update obj_idxes according to the new matching result.
             if len(indices[0])>0:
@@ -328,7 +396,8 @@ class VideoTrackHungarianMatcher(nn.Module):
         return all_indices
 
     @torch.no_grad()
-    def forward(self, outputs, targets, track_instances_list):
+    #def forward(self, outputs, targets, track_instances_list):
+    def forward(self, outputs, targets, track_instances_list=None):
         """Performs the matching
 
         Params:
@@ -348,7 +417,10 @@ class VideoTrackHungarianMatcher(nn.Module):
             For each batch element, it holds:
                 len(index_i) = len(index_j) = min(num_queries, num_target_boxes)
         """
-        return self.memory_efficient_forward(outputs, targets, track_instances_list)
+        if track_instances_list is not None:
+            return self.memory_efficient_forward_track(outputs, targets, track_instances_list)
+        else:
+            return self.memory_efficient_forward(outputs, targets)
 
     def __repr__(self, _repr_indent=4):
         head = "Matcher " + self.__class__.__name__

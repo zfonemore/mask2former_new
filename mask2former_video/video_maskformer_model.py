@@ -365,9 +365,7 @@ class VideoMaskFormer(nn.Module):
 
     def post_process(self, output, track_instances_list, targets, is_last, img_size=None, frame=0):
         with torch.no_grad():
-            if self.training:
-                scores = F.softmax(output['pred_logits'][:], dim=-1)[:, :, :-1]
-            else:
+            if not self.training:
                 scores = F.softmax(output['pred_logits'][0], dim=-1)[:, :-1]
                 labels = torch.arange(self.sem_seg_head.num_classes, device=self.device).unsqueeze(0).repeat(len(scores), 1).flatten(0, 1)
                 scores_per_image, topk_indices = scores.flatten(0, 1).topk(10, sorted=False)
@@ -382,7 +380,6 @@ class VideoMaskFormer(nn.Module):
 
         if self.training:
             for i, track_instances in enumerate(track_instances_list):
-                #track_instances.scores = scores[i]
                 track_instances.pred_logits = output['pred_logits'][i]
                 track_instances.output_embedding = output['hs']
             # the track id will be assigned by the mather.
@@ -390,6 +387,7 @@ class VideoMaskFormer(nn.Module):
         else:
             #self.track_base.update(track_instances)
             #track_instances_list[0] = track_instances_list[0][topk_indices]
+            track_instances_list[0].output_embedding = output['hs']
             for i, ind in enumerate(topk_indices):
                 if track_instances_list[0][ind.item()].obj_idxes == -1:
                     track_instances_list[0][ind.item()].obj_idxes[0] = self.curr_objnum
@@ -405,15 +403,8 @@ class VideoMaskFormer(nn.Module):
         if not is_last:
             for i, track_instances in enumerate(track_instances_list):
                 init_track_instances = self._generate_empty_tracks()
-                track_instances = self.qim(track_instances, init_track_instances)
-                '''
-                if self.training:
-                    active_idxes = (track_instances.obj_idxes >= 0)
-                    active_track_instances = track_instances[active_idxes]
-                else:
-                    active_track_instances = track_instances
-                '''
-                merged_track_instances = track_instances #Instances.cat([init_track_instances, active_track_instances])
+                active_track_instances = self.qim(track_instances, init_track_instances)
+                merged_track_instances = active_track_instances #Instances.cat([init_track_instances, active_track_instances])
                 track_instances_list[i] = merged_track_instances
         else:
             for i in range(len(track_instances_list)):
