@@ -309,7 +309,7 @@ class VideoMaskFormer(nn.Module):
                 width = input_per_image.get("width", image_size[1])
 
                 # bipartite matching-based loss
-                self.post_process(outputs, track_instances_list, None, is_last=(frame==self.num_frames-1), img_size=image_size, frame=frame)
+                self.post_process(outputs, track_instances_list, None, is_last=(frame==self.num_frames-1), img_size=image_size, pad_size=images.tensor.shape, frame=frame)
                 #losses = self.criterion(outputs, targets)
 
                 '''
@@ -363,7 +363,7 @@ class VideoMaskFormer(nn.Module):
         return gt_instances
 
 
-    def post_process(self, output, track_instances_list, targets, is_last, img_size=None, frame=0):
+    def post_process(self, output, track_instances_list, targets, is_last, img_size=None, pad_size=None, frame=0):
         with torch.no_grad():
             if not self.training:
                 scores = F.softmax(output['pred_logits'][0], dim=-1)[:, :-1]
@@ -372,9 +372,17 @@ class VideoMaskFormer(nn.Module):
                 labels_per_image = labels[topk_indices]
                 topk_indices = topk_indices // self.sem_seg_head.num_classes
                 pred_masks = output["pred_masks"][0]
-
                 topk_indices = torch.unique(topk_indices)
                 pred_masks = pred_masks[topk_indices]
+
+                # upsample masks
+                pred_masks = retry_if_cuda_oom(F.interpolate)(
+                    pred_masks,
+                    size=(pad_size[-2], pad_size[-1]),
+                    mode="bilinear",
+                    align_corners=False,
+                )
+
                 pred_masks = pred_masks[:, :, : img_size[0], : img_size[1]]
                 pred_scores = scores[topk_indices]
 
