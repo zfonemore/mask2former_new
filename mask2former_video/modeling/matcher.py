@@ -390,7 +390,7 @@ class VideoTrackHungarianMatcher(nn.Module):
                 new_matched_indices[idx][1] = j
             matched_indices = torch.cat([new_matched_indices, prev_matched_indices], dim=0)
 
-            indices = (matched_indices[:, -1], matched_indices[:, 1])
+            indices = (matched_indices[:, 0], matched_indices[:, 1])
             all_indices.append(indices)
 
         return all_indices
