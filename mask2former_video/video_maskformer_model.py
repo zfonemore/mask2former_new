@@ -369,6 +369,9 @@ class VideoMaskFormer(nn.Module):
                 scores = F.softmax(output['pred_logits'][0], dim=-1)[:, :-1]
                 labels = torch.arange(self.sem_seg_head.num_classes, device=self.device).unsqueeze(0).repeat(len(scores), 1).flatten(0, 1)
                 scores_per_image, topk_indices = scores.flatten(0, 1).topk(10, sorted=False)
+                score_thr = 0.1
+                topk_indices = topk_indices[scores_per_image > score_thr]
+                scores_per_image = scores_per_image[scores_per_image > score_thr]
                 labels_per_image = labels[topk_indices]
                 topk_indices = topk_indices // self.sem_seg_head.num_classes
                 pred_masks = output["pred_masks"][0]
@@ -395,6 +398,13 @@ class VideoMaskFormer(nn.Module):
         else:
             #self.track_base.update(track_instances)
             #track_instances_list[0] = track_instances_list[0][topk_indices]
+            '''
+            print(scores_per_image)
+            print(labels_per_image)
+            print(topk_indices)
+            import pdb
+            pdb.set_trace()
+            '''
             track_instances_list[0].output_embedding = output['hs']
             for i, ind in enumerate(topk_indices):
                 if track_instances_list[0][ind.item()].obj_idxes == -1:
