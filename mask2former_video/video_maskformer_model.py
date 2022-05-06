@@ -432,10 +432,10 @@ class VideoMaskFormer(nn.Module):
         scores_per_image, topk_indices = pred_scores.flatten(0, 1).topk(10, sorted=False)
         labels_per_image = topk_indices % self.sem_seg_head.num_classes
         topk_indices = topk_indices // self.sem_seg_head.num_classes
+        pred_masks = pred_masks[topk_indices]
         pred_masks = F.interpolate(
             pred_masks, size=(out_height, out_width), mode="bilinear", align_corners=False
         )
-
         masks = pred_masks > 0.
 
         out_scores = scores_per_image.tolist()
