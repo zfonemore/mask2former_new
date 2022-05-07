@@ -292,6 +292,8 @@ class VideoTrackHungarianMatcher(nn.Module):
 
             track_instances = track_instances_list[b]
             pred_logits_i = track_instances.pred_logits  # predicted logits of i-th image.
+            gt_ids = torch.unique(gt_ids.unsqueeze(0))
+            gt_ids = gt_ids[gt_ids != -1]
             obj_idxes_list = gt_ids.detach().cpu().numpy().tolist()
             obj_idx_to_gt_idx = {obj_idx: gt_idx for gt_idx, obj_idx in enumerate(obj_idxes_list)}
 

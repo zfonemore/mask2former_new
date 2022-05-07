@@ -121,6 +121,7 @@ class VideoMaskFormer(nn.Module):
         self.scores_dict = {}
         self.masks_dict = {}
         self.qim = qim
+        self.clip_len = 2
         # learnable query p.e.
         #self.track_query_pos = nn.Embedding(num_queries, hidden_dim)
 
@@ -256,6 +257,7 @@ class VideoMaskFormer(nn.Module):
 
         features = self.backbone(images.tensor)
 
+        clip_len = self.clip_len
         # generate empty track instances
         track_instances_list = []
         for i in range(batch_size):
@@ -263,16 +265,18 @@ class VideoMaskFormer(nn.Module):
             track_instances_list.append(track_instances)
 
         if self.training:
+
             # mask classification target
-            targets = self.prepare_targets(batched_inputs, images)
+            targets = self.prepare_targets_clip(batched_inputs, images, clip_len)
 
             losses_all = {}
-            for frame in range(self.num_frames):
-                indices = slice(frame, frame+self.num_frames*(batch_size-1)+1, self.num_frames)
+            for frame in range(0, self.num_frames, clip_len):
+                #indices = slice(frame, frame+self.num_frames*(batch_size-1)+1, self.num_frames)
+                indices = slice(frame, frame+clip_len, 1)
                 features_perframe = {}
                 for key in features.keys():
                     features_perframe[key] = features[key][indices]
-                targets_perframe = targets[frame]
+                targets_perframe = [targets[frame // clip_len]]
 
                 outputs = self.sem_seg_head(features_perframe, track_query=track_instances_list[0].query_pos)
 
@@ -294,8 +298,12 @@ class VideoMaskFormer(nn.Module):
 
             return losses_all
         else:
-            for frame in range(self.num_frames):
-                indices = slice(frame, frame+1, 1)
+            for frame in range(0, self.num_frames, clip_len):
+                if frame+clip_len < self.num_frames :
+                    indices = slice(frame, frame+clip_len, 1)
+                else:
+                    indices = slice(self.num_frames-clip_len, self.num_frames, 1)
+                    frame = self.num_frames-clip_len
                 features_perframe = {}
                 for key in features.keys():
                     features_perframe[key] = features[key][indices]
@@ -362,6 +370,35 @@ class VideoMaskFormer(nn.Module):
 
         return gt_instances
 
+    def prepare_targets_clip(self, targets, images, clip_len):
+        h_pad, w_pad = images.tensor.shape[-2:]
+        gt_instances = []
+        for targets_per_video in targets:
+            _num_instance = len(targets_per_video["instances"][0])
+            for frame in range(0, self.num_frames, clip_len):
+                mask_shape = [_num_instance, clip_len, h_pad, w_pad]
+                gt_masks_per_clip = torch.zeros(mask_shape, dtype=torch.bool, device=self.device)
+
+                gt_ids_per_clip = []
+                for f_i in range(frame, frame+clip_len, 1):
+                    targets_per_frame = targets_per_video["instances"][f_i]
+                    targets_per_frame = targets_per_frame.to(self.device)
+                    h, w = targets_per_frame.image_size
+
+                    gt_ids_per_clip.append(targets_per_frame.gt_ids[:, None])
+                    gt_masks_per_clip[:, f_i-frame, :h, :w] = targets_per_frame.gt_masks.tensor
+
+                gt_ids_per_clip = torch.cat(gt_ids_per_clip, dim=1)
+                valid_idx = (gt_ids_per_clip != -1).any(dim=-1)
+
+                gt_classes_per_clip = targets_per_frame.gt_classes[valid_idx]          # N,
+                gt_ids_per_clip = gt_ids_per_clip[valid_idx]                          # N, num_frames
+
+                gt_instances.append({"labels": gt_classes_per_clip, "ids": gt_ids_per_clip})
+                gt_masks_per_clip = gt_masks_per_clip[valid_idx].float()          # N, num_frames, H, W
+                gt_instances[-1].update({"masks": gt_masks_per_clip})
+
+        return gt_instances
 
     def post_process(self, output, track_instances_list, targets, is_last, img_size=None, pad_size=None, frame=0):
         with torch.no_grad():
@@ -396,8 +433,6 @@ class VideoMaskFormer(nn.Module):
             # the track id will be assigned by the mather.
             losses = self.criterion(output, targets, track_instances_list)
         else:
-            #self.track_base.update(track_instances)
-            #track_instances_list[0] = track_instances_list[0][topk_indices]
             '''
             print(scores_per_image)
             print(labels_per_image)
@@ -417,7 +452,7 @@ class VideoMaskFormer(nn.Module):
                 else:
                     obj_idx = track_instances_list[0][ind.item()].obj_idxes[0].item()
                     self.scores_dict[obj_idx][frame] = pred_scores[i]
-                    self.masks_dict[obj_idx][frame] = pred_masks[i][0]
+                    self.masks_dict[obj_idx][frame:frame+self.clip_len] = pred_masks[i]
         if not is_last:
             for i, track_instances in enumerate(track_instances_list):
                 init_track_instances = self._generate_empty_tracks()
