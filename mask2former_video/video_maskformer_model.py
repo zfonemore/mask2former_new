@@ -71,6 +71,8 @@ class VideoMaskFormer(nn.Module):
         num_frames,
         hidden_dim,
         qim,
+        train_clip_len,
+        eval_clip_len,
     ):
         """
         Args:
@@ -121,7 +123,8 @@ class VideoMaskFormer(nn.Module):
         self.scores_dict = {}
         self.masks_dict = {}
         self.qim = qim
-        self.clip_len = 2
+        self.train_clip_len = train_clip_len
+        self.eval_clip_len = eval_clip_len
         # learnable query p.e.
         #self.track_query_pos = nn.Embedding(num_queries, hidden_dim)
 
@@ -190,6 +193,8 @@ class VideoMaskFormer(nn.Module):
             "num_frames": cfg.INPUT.SAMPLING_FRAME_NUM,
             "hidden_dim": cfg.MODEL.MASK_FORMER.HIDDEN_DIM,
             "qim": qim,
+            "train_clip_len": cfg.INPUT.TRAIN_CLIP_LEN,
+            "eval_clip_len": cfg.INPUT.EVAL_CLIP_LEN,
         }
 
     @property
@@ -257,7 +262,6 @@ class VideoMaskFormer(nn.Module):
 
         features = self.backbone(images.tensor)
 
-        clip_len = self.clip_len
         # generate empty track instances
         track_instances_list = []
         for i in range(batch_size):
@@ -265,6 +269,7 @@ class VideoMaskFormer(nn.Module):
             track_instances_list.append(track_instances)
 
         if self.training:
+            clip_len = self.train_clip_len
 
             # mask classification target
             targets = self.prepare_targets_clip(batched_inputs, images, clip_len)
@@ -298,6 +303,9 @@ class VideoMaskFormer(nn.Module):
 
             return losses_all
         else:
+            clip_len = self.eval_clip_len
+            if clip_len > self.num_frames:
+                clip_len = self.num_frames
             for frame in range(0, self.num_frames, clip_len):
                 if frame+clip_len < self.num_frames :
                     indices = slice(frame, frame+clip_len, 1)
@@ -447,12 +455,12 @@ class VideoMaskFormer(nn.Module):
                     self.scores_dict[self.curr_objnum] = pred_scores.new_zeros(self.num_frames, self.sem_seg_head.num_classes) #pred_scores[i]
                     self.masks_dict[self.curr_objnum] = pred_masks.new_zeros(self.num_frames, pred_masks.shape[-2], pred_masks.shape[-1]) #pred_masks[i]
                     self.scores_dict[self.curr_objnum][frame] = pred_scores[i]
-                    self.masks_dict[self.curr_objnum][frame] = pred_masks[i][0]
+                    self.masks_dict[self.curr_objnum][frame:frame+self.eval_clip_len] = pred_masks[i]
                     self.curr_objnum += 1
                 else:
                     obj_idx = track_instances_list[0][ind.item()].obj_idxes[0].item()
                     self.scores_dict[obj_idx][frame] = pred_scores[i]
-                    self.masks_dict[obj_idx][frame:frame+self.clip_len] = pred_masks[i]
+                    self.masks_dict[obj_idx][frame:frame+self.eval_clip_len] = pred_masks[i]
         if not is_last:
             for i, track_instances in enumerate(track_instances_list):
                 init_track_instances = self._generate_empty_tracks()
