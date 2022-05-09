@@ -275,9 +275,15 @@ class VideoMaskFormer(nn.Module):
             targets = self.prepare_targets_clip(batched_inputs, images, clip_len)
 
             losses_all = {}
+            is_last = False
             for frame in range(0, self.num_frames, clip_len):
-                #indices = slice(frame, frame+self.num_frames*(batch_size-1)+1, self.num_frames)
-                indices = slice(frame, frame+clip_len, 1)
+                if frame+clip_len < self.num_frames:
+                    indices = slice(frame, frame+clip_len, 1)
+                else:
+                    is_last = True
+                    frame = max(0, self.num_frames-clip_len)
+                    indices = slice(frame, self.num_frames, 1)
+
                 features_perframe = {}
                 for key in features.keys():
                     features_perframe[key] = features[key][indices]
@@ -286,7 +292,7 @@ class VideoMaskFormer(nn.Module):
                 outputs = self.sem_seg_head(features_perframe, track_query=track_instances_list[0].query_pos)
 
                 # bipartite matching-based loss
-                losses = self.post_process(outputs, track_instances_list, targets_perframe, is_last=(frame==self.num_frames-1))
+                losses = self.post_process(outputs, track_instances_list, targets_perframe, is_last=is_last)
                 #losses = self.criterion(outputs, targets)
 
                 for k in list(losses.keys()):
@@ -303,51 +309,59 @@ class VideoMaskFormer(nn.Module):
 
             return losses_all
         else:
+            query_eval = True
             clip_len = self.eval_clip_len
+
+            if self.num_frames % clip_len == 0:
+                self.eval_clip_nums = (self.num_frames // clip_len)
+            else:
+                self.eval_clip_nums = (self.num_frames // clip_len) + 1
             if clip_len > self.num_frames:
                 clip_len = self.num_frames
+            is_last = False
             for frame in range(0, self.num_frames, clip_len):
-                if frame+clip_len < self.num_frames :
+                if frame+clip_len < self.num_frames:
                     indices = slice(frame, frame+clip_len, 1)
                 else:
-                    indices = slice(self.num_frames-clip_len, self.num_frames, 1)
-                    frame = self.num_frames-clip_len
+                    is_last = True
+                    frame = max(0, self.num_frames-clip_len)
+                    indices = slice(frame, self.num_frames, 1)
                 features_perframe = {}
                 for key in features.keys():
                     features_perframe[key] = features[key][indices]
 
-                outputs = self.sem_seg_head(features_perframe, track_query=track_instances_list[0].query_pos)
-
                 input_per_image = batched_inputs[0]
                 image_size = images.image_sizes[0]  # image size without padding after data augmentation
-
                 height = input_per_image.get("height", image_size[0])  # raw image size before data augmentation
                 width = input_per_image.get("width", image_size[1])
 
-                # bipartite matching-based loss
-                self.post_process(outputs, track_instances_list, None, is_last=(frame==self.num_frames-1), img_size=image_size, pad_size=images.tensor.shape, frame=frame)
-                #losses = self.criterion(outputs, targets)
+                if query_eval:
+                    outputs = self.sem_seg_head(features_perframe, track_query=track_instances_list[0].query_pos)
+                    self.post_process(outputs, track_instances_list, None, is_last=is_last, img_size=image_size, pad_size=images.tensor.shape, frame=frame)
+                else:
+                    outputs = self.sem_seg_head(features_perframe, track_query=None)#track_instances_list[0].query_pos)
 
-                '''
-                mask_cls_results = outputs["pred_logits"]
-                mask_pred_results = outputs["pred_masks"]
+                    mask_cls_results = outputs["pred_logits"]
+                    mask_pred_results = outputs["pred_masks"]
 
-                mask_cls_result = mask_cls_results[0]
-                # upsample masks
-                mask_pred_result = retry_if_cuda_oom(F.interpolate)(
-                    mask_pred_results[0],
-                    size=(images.tensor.shape[-2], images.tensor.shape[-1]),
-                    mode="bilinear",
-                    align_corners=False,
-                )
+                    mask_cls_result = mask_cls_results[0]
+                    # upsample masks
+                    mask_pred_result = retry_if_cuda_oom(F.interpolate)(
+                        mask_pred_results[0],
+                        size=(images.tensor.shape[-2], images.tensor.shape[-1]),
+                        mode="bilinear",
+                        align_corners=False,
+                    )
 
                 del outputs
-                '''
-            outputs = self.combine_to_video(height, width)
-            self.scores_dict = {}
-            self.masks_dict = {}
+            if query_eval:
+                outputs = self.combine_to_video(height, width)
+                self.scores_dict = {}
+                self.masks_dict = {}
+                return outputs
+            else:
+                return retry_if_cuda_oom(self.inference_video)(mask_cls_result, mask_pred_result, image_size, height, width)
 
-            return outputs #retry_if_cuda_oom(self.inference_video)(mask_cls_result, mask_pred_result, image_size, height, width)
 
     def prepare_targets(self, targets, images):
         h_pad, w_pad = images.tensor.shape[-2:]
@@ -414,12 +428,19 @@ class VideoMaskFormer(nn.Module):
                 scores = F.softmax(output['pred_logits'][0], dim=-1)[:, :-1]
                 labels = torch.arange(self.sem_seg_head.num_classes, device=self.device).unsqueeze(0).repeat(len(scores), 1).flatten(0, 1)
                 scores_per_image, topk_indices = scores.flatten(0, 1).topk(10, sorted=False)
-                score_thr = 0.1
+                score_thr = 0.05
                 topk_indices = topk_indices[scores_per_image > score_thr]
                 scores_per_image = scores_per_image[scores_per_image > score_thr]
                 labels_per_image = labels[topk_indices]
                 topk_indices = topk_indices // self.sem_seg_head.num_classes
                 pred_masks = output["pred_masks"][0]
+                '''
+                print('scores_per_image:', scores_per_image)
+                print('labels_per_image:', labels_per_image)
+                print('topk:', topk_indices)
+                import pdb
+                pdb.set_trace()
+                '''
                 topk_indices = torch.unique(topk_indices)
                 pred_masks = pred_masks[topk_indices]
 
@@ -441,25 +462,22 @@ class VideoMaskFormer(nn.Module):
             # the track id will be assigned by the mather.
             losses = self.criterion(output, targets, track_instances_list)
         else:
-            '''
-            print(scores_per_image)
-            print(labels_per_image)
-            print(topk_indices)
-            import pdb
-            pdb.set_trace()
-            '''
             track_instances_list[0].output_embedding = output['hs']
+            if frame % self.eval_clip_len == 0:
+                curr_clip = frame // self.eval_clip_len
+            else:
+                curr_clip = frame // self.eval_clip_len + 1
             for i, ind in enumerate(topk_indices):
                 if track_instances_list[0][ind.item()].obj_idxes == -1:
                     track_instances_list[0][ind.item()].obj_idxes[0] = self.curr_objnum
-                    self.scores_dict[self.curr_objnum] = pred_scores.new_zeros(self.num_frames, self.sem_seg_head.num_classes) #pred_scores[i]
+                    self.scores_dict[self.curr_objnum] = pred_scores.new_zeros(self.eval_clip_nums, self.sem_seg_head.num_classes) #pred_scores[i]
                     self.masks_dict[self.curr_objnum] = pred_masks.new_zeros(self.num_frames, pred_masks.shape[-2], pred_masks.shape[-1]) #pred_masks[i]
-                    self.scores_dict[self.curr_objnum][frame] = pred_scores[i]
+                    self.scores_dict[self.curr_objnum][curr_clip] = pred_scores[i]
                     self.masks_dict[self.curr_objnum][frame:frame+self.eval_clip_len] = pred_masks[i]
                     self.curr_objnum += 1
                 else:
                     obj_idx = track_instances_list[0][ind.item()].obj_idxes[0].item()
-                    self.scores_dict[obj_idx][frame] = pred_scores[i]
+                    self.scores_dict[obj_idx][curr_clip] = pred_scores[i]
                     self.masks_dict[obj_idx][frame:frame+self.eval_clip_len] = pred_masks[i]
         if not is_last:
             for i, track_instances in enumerate(track_instances_list):
