@@ -215,13 +215,7 @@ class VideoMaskFormer(nn.Module):
         #track_instances.track_scores = torch.zeros((len(track_instances),), dtype=torch.float, device=device)
         #track_instances.pred_boxes = torch.zeros((len(track_instances), 4), dtype=torch.float, device=device)
         track_instances.pred_logits = torch.zeros((len(track_instances), self.sem_seg_head.num_classes+1), dtype=torch.float, device=device)
-
-        '''
-        mem_bank_len = self.mem_bank_len
-        track_instances.mem_bank = torch.zeros((len(track_instances), mem_bank_len, dim // 2), dtype=torch.float32, device=device)
-        track_instances.mem_padding_mask = torch.ones((len(track_instances), mem_bank_len), dtype=torch.bool, device=device)
-        track_instances.save_period = torch.zeros((len(track_instances), ), dtype=torch.float32, device=device)
-        '''
+        #track_instances.attn_mask = torch.zeros((len(track_instances), ), dtype=torch.float, device=device)
 
         return track_instances.to(self.device)
 
@@ -289,10 +283,11 @@ class VideoMaskFormer(nn.Module):
                     features_perframe[key] = features[key][indices]
                 targets_perframe = [targets[frame // clip_len]]
 
-                outputs = self.sem_seg_head(features_perframe, track_query=track_instances_list[0].query_pos)
+                track_instance = track_instances_list[0]
+                outputs = self.sem_seg_head(features_perframe, track_query=track_instance.query_pos, attn_mask=attn_mask if frame>0 else None)
 
                 # bipartite matching-based loss
-                losses = self.post_process(outputs, track_instances_list, targets_perframe, is_last=is_last)
+                losses, attn_mask = self.post_process(outputs, track_instances_list, targets_perframe, is_last=is_last)
                 #losses = self.criterion(outputs, targets)
 
                 for k in list(losses.keys()):
@@ -336,8 +331,8 @@ class VideoMaskFormer(nn.Module):
                 width = input_per_image.get("width", image_size[1])
 
                 if query_eval:
-                    outputs = self.sem_seg_head(features_perframe, track_query=track_instances_list[0].query_pos)
-                    self.post_process(outputs, track_instances_list, None, is_last=is_last, img_size=image_size, pad_size=images.tensor.shape, frame=frame)
+                    outputs = self.sem_seg_head(features_perframe, track_query=track_instances_list[0].query_pos, attn_mask=attn_mask if frame>0 else None)
+                    attn_mask = self.post_process(outputs, track_instances_list, None, is_last=is_last, img_size=image_size, pad_size=images.tensor.shape, frame=frame)
                 else:
                     outputs = self.sem_seg_head(features_perframe, track_query=None)#track_instances_list[0].query_pos)
 
@@ -459,6 +454,7 @@ class VideoMaskFormer(nn.Module):
             for i, track_instances in enumerate(track_instances_list):
                 track_instances.pred_logits = output['pred_logits'][i]
                 track_instances.output_embedding = output['hs']
+                #track_instances.attn_mask = output['attn_mask'].transpose(0,1)
             # the track id will be assigned by the mather.
             losses = self.criterion(output, targets, track_instances_list)
         else:
@@ -479,9 +475,18 @@ class VideoMaskFormer(nn.Module):
                     obj_idx = track_instances_list[0][ind.item()].obj_idxes[0].item()
                     self.scores_dict[obj_idx][curr_clip] = pred_scores[i]
                     self.masks_dict[obj_idx][frame:frame+self.eval_clip_len] = pred_masks[i]
+        '''
+        print('frame:', frame)
+        print('topk:', topk_indices)
+        print('index:', track_instances_list[0].obj_idxes)
+        print('scores:', scores_per_image)
+        print('labels:', labels_per_image)
+        '''
         if not is_last:
             for i, track_instances in enumerate(track_instances_list):
                 init_track_instances = self._generate_empty_tracks()
+                attn_mask = output['attn_mask'].transpose(0,1)
+                attn_mask = attn_mask[(track_instances.obj_idxes>=0)]
                 active_track_instances = self.qim(track_instances, init_track_instances)
                 merged_track_instances = active_track_instances #Instances.cat([init_track_instances, active_track_instances])
                 track_instances_list[i] = merged_track_instances
@@ -489,8 +494,11 @@ class VideoMaskFormer(nn.Module):
             for i in range(len(track_instances_list)):
                 init_track_instances = self._generate_empty_tracks()
                 track_instances_list[i] = init_track_instances
+                attn_mask = None
         if self.training:
-            return losses
+            return losses, attn_mask
+        else:
+            return attn_mask
 
     def combine_to_video(self, out_height, out_width):
         pred_scores = []

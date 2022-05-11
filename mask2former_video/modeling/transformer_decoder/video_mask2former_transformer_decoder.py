@@ -318,9 +318,9 @@ class VideoMultiScaleMaskedTransformerDecoder(nn.Module):
 
         self.num_queries = num_queries
         # learnable query features
-        #self.query_feat = nn.Embedding(num_queries, hidden_dim)
+        self.query_feat = nn.Embedding(num_queries, hidden_dim)
         # learnable query p.e.
-        #self.query_embed = nn.Embedding(num_queries, hidden_dim)
+        self.query_embed = nn.Embedding(num_queries, hidden_dim)
 
         # level embedding (we always use 3 scales)
         self.num_feature_levels = 3
@@ -367,7 +367,7 @@ class VideoMultiScaleMaskedTransformerDecoder(nn.Module):
 
         return ret
 
-    def forward(self, x, mask_features, mask = None, track_query=None):
+    def forward(self, x, mask_features, mask = None, track_query = None, prev_attn_mask = None):
         bt, c_m, h_m, w_m = mask_features.shape
         #bs = bt // self.num_frames if self.training else 1
         bs = 1
@@ -407,6 +407,9 @@ class VideoMultiScaleMaskedTransformerDecoder(nn.Module):
 
         # prediction heads on learnable query features
         outputs_class, outputs_mask, attn_mask = self.forward_prediction_heads(output, mask_features, attn_mask_target_size=size_list[0])
+        if prev_attn_mask is not None:
+            prev_attn_mask = prev_attn_mask.transpose(0, 1)
+            attn_mask = torch.cat((attn_mask[:, :100, :], prev_attn_mask), dim=1)
         predictions_class.append(outputs_class)
         predictions_mask.append(outputs_mask)
 
@@ -440,6 +443,7 @@ class VideoMultiScaleMaskedTransformerDecoder(nn.Module):
 
         out = {
             'hs': output.squeeze(1),
+            'attn_mask': attn_mask,
             'pred_logits': predictions_class[-1],
             'pred_masks': predictions_mask[-1],
             'aux_outputs': self._set_aux_loss(
