@@ -284,7 +284,9 @@ class VideoMaskFormer(nn.Module):
                 targets_perframe = [targets[frame // clip_len]]
 
                 track_instance = track_instances_list[0]
-                outputs = self.sem_seg_head(features_perframe, track_query=track_instance.query_pos, attn_mask=attn_mask if frame>0 else None)
+                #outputs = self.sem_seg_head(features_perframe, track_query=track_instance.query_pos, attn_mask=attn_mask if frame>0 else None)
+                outputs = self.sem_seg_head(features_perframe, track_query=track_instance.query_pos, memory_features=memory_features if frame>0 else None)
+                memory_features = outputs['features']
 
                 # bipartite matching-based loss
                 losses, attn_mask = self.post_process(outputs, track_instances_list, targets_perframe, is_last=is_last)
@@ -331,7 +333,9 @@ class VideoMaskFormer(nn.Module):
                 width = input_per_image.get("width", image_size[1])
 
                 if query_eval:
-                    outputs = self.sem_seg_head(features_perframe, track_query=track_instances_list[0].query_pos, attn_mask=attn_mask if frame>0 else None)
+                    #outputs = self.sem_seg_head(features_perframe, track_query=track_instances_list[0].query_pos, attn_mask=attn_mask if frame>0 else None)
+                    outputs = self.sem_seg_head(features_perframe, track_query=track_instances_list[0].query_pos, memory_features=memory_features if frame>0 else None)
+                    memory_features = outputs['features']
                     attn_mask = self.post_process(outputs, track_instances_list, None, is_last=is_last, img_size=image_size, pad_size=images.tensor.shape, frame=frame)
                 else:
                     outputs = self.sem_seg_head(features_perframe, track_query=None)#track_instances_list[0].query_pos)

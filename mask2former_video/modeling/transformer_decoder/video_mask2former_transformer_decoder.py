@@ -314,6 +314,29 @@ class VideoMultiScaleMaskedTransformerDecoder(nn.Module):
                 )
             )
 
+        self.prop_cross_attention = CrossAttentionLayer(
+            d_model=hidden_dim,
+            nhead=nheads,
+            dropout=0.0,
+            normalize_before=pre_norm,
+        )
+
+        '''
+        self.prop_self_attention = SelfAttentionLayer(
+            d_model=hidden_dim,
+            nhead=nheads,
+            dropout=0.0,
+            normalize_before=pre_norm,
+        )
+
+        self.prop_ffn_layer = FFNLayer(
+            d_model=hidden_dim,
+            dim_feedforward=dim_feedforward,
+            dropout=0.0,
+            normalize_before=pre_norm,
+        )
+        '''
+
         self.decoder_norm = nn.LayerNorm(hidden_dim)
 
         self.num_queries = num_queries
@@ -367,7 +390,7 @@ class VideoMultiScaleMaskedTransformerDecoder(nn.Module):
 
         return ret
 
-    def forward(self, x, mask_features, mask = None, track_query = None, prev_attn_mask = None):
+    def forward(self, x, mask_features, mask = None, track_query = None, prev_attn_mask = None, memory_features = None):
         bt, c_m, h_m, w_m = mask_features.shape
         #bs = bt // self.num_frames if self.training else 1
         bs = 1
@@ -404,6 +427,32 @@ class VideoMultiScaleMaskedTransformerDecoder(nn.Module):
 
         predictions_class = []
         predictions_mask = []
+
+        prop = True
+        if prop:
+            if memory_features is None:
+                memory_features = src[0]
+            else:
+                memory_features = self.prop_cross_attention(
+                    memory_features, src[0],
+                    memory_mask=None,
+                    memory_key_padding_mask=None,  # here we do not apply masking on padded region
+                    pos=pos[0], query_pos=None
+                )
+                src[0] = memory_features
+
+            '''
+            output = self.prop_self_attention(
+                output, tgt_mask=None,
+                tgt_key_padding_mask=None,
+                query_pos=query_embed
+            )
+
+            # FFN
+            output = self.prop_ffn_layer(
+                output
+            )
+            '''
 
         # prediction heads on learnable query features
         outputs_class, outputs_mask, attn_mask = self.forward_prediction_heads(output, mask_features, attn_mask_target_size=size_list[0])
@@ -444,6 +493,7 @@ class VideoMultiScaleMaskedTransformerDecoder(nn.Module):
         out = {
             'hs': output.squeeze(1),
             'attn_mask': attn_mask,
+            'features': memory_features,
             'pred_logits': predictions_class[-1],
             'pred_masks': predictions_mask[-1],
             'aux_outputs': self._set_aux_loss(
